@@ -1,4 +1,8 @@
+**Русский** | [English](README.en.md)
+
 # NVIDIA RTX 2070 Max-Q: засыпание в D3cold (0 Вт)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Гибридный ноутбук **MSI P65** (Intel UHD 630 + NVIDIA RTX 2070 Max-Q, Turing TU106M)
 под **Arch Linux + KDE Plasma Wayland + SDDM**.
@@ -420,7 +424,9 @@ sudo reboot
 | `fix_rtd3.sh` | Промежуточный шаг: RTD3 + re-probe (вобрано в `setup-d3cold.sh`) |
 | `fix_d3_sleep.sh` | Промежуточный шаг: Xorg/KWin на Intel (вобрано) |
 | `enable_d3cold.sh` | Промежуточный шаг: `GpuInitOnProbe` + `modeset=0` (вобрано) |
-| `README.md` | Этот документ |
+| `README.md` | Этот документ (русский) |
+| `README.en.md` | English version |
+| `LICENSE` | MIT License |
 
 Старые три скрипта оставлены для истории; запускать нужно только
 `setup-d3cold.sh`.
