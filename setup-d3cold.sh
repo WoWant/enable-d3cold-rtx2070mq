@@ -246,19 +246,21 @@ ok "/etc/X11/xorg.conf.d/10-intel-only.conf (BusID $INTEL_XORG_BUSID)"
 # ---------------------------------------------------------------------------
 info "Шаг 10/11: KWin — только Intel (DRM-ограничение + EGL)"
 # ---------------------------------------------------------------------------
-# 10.1. Стабильная ссылка на Intel: /dev/dri/intel-card (без двоеточий!)
+# 10.1. Стабильные ссылки на Intel: card + render (в именах нет двоеточий!)
 cat > /etc/udev/rules.d/70-intel-drm.rules <<EOF
-SUBSYSTEM=="drm", KERNEL=="card*", KERNELS=="$INTEL_BDF", SYMLINK+="dri/intel-card"
+SUBSYSTEM=="drm", KERNEL=="card*",    KERNELS=="$INTEL_BDF", SYMLINK+="dri/intel-card"
+SUBSYSTEM=="drm", KERNEL=="renderD*", KERNELS=="$INTEL_BDF", SYMLINK+="dri/intel-render"
 EOF
 udevadm control --reload
 udevadm trigger --subsystem-match=drm --action=add 2>/dev/null || true
 udevadm settle 2>/dev/null || true
 ok "/etc/udev/rules.d/70-intel-drm.rules"
 
-# 10.2. KWin управляет только Intel-картой
+# 10.2. KWin управляет только Intel (DRM-карта + render-узел)
 install -d -o "$USER_NAME" -g "$USER_GROUP" "$USER_HOME/.config/environment.d"
 cat > "$USER_HOME/.config/environment.d/kwin-gpu.conf" <<'EOF'
 KWIN_DRM_DEVICES=/dev/dri/intel-card
+KWIN_RENDER_NODES=/dev/dri/intel-render
 EOF
 chown "$USER_NAME:" "$USER_HOME/.config/environment.d/kwin-gpu.conf"
 ok "$USER_HOME/.config/environment.d/kwin-gpu.conf"

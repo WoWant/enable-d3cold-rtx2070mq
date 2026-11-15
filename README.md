@@ -47,8 +47,9 @@ GSP ≈ 1.5 с (или ≈0.5 с из D3hot). Главный поток KWin в 
 | 3 | Драйвер **620.x**: `NVreg_GpuInitOnProbe=2` (по умолчанию) инициализирует GPU на probe и **никогда не отпускает** ссылку `NV_DYNAMIC_PM_COARSE` | `NVreg_GpuInitOnProbe=0` |
 | 4 | `nvidia_drm modeset=1` через NVKMS держит GPU открытым (+1 MiB VRAM) | `nvidia_drm modeset=0 fbdev=0` |
 | 5 | Держатели `/dev/nvidia*` (Xorg-греетер SDDM, KWin) не дают `usage_count` стать 0 | Xorg → только Intel; KWin → только Mesa/Intel |
+| 6 | KWin 6.8.2 `GpuManager` сканирует **все** render-узлы, включая `renderD129` (NVIDIA), и открывает `/dev/nvidia*` | `KWIN_RENDER_NODES=/dev/dri/intel-render` |
 
-Любая одна из причин 1–5 блокирует D3cold. Нужны все сразу.
+Любая одна из причин 1–6 блокирует D3cold. Нужны все сразу.
 
 ## 3. Итоговая рабочая конфигурация
 
@@ -60,7 +61,7 @@ GSP ≈ 1.5 с (или ≈0.5 с из D3hot). Главный поток KWin в 
 /etc/udev/rules.d/80-nvidia-pm.rules     power/control=auto при bind
 /etc/udev/rules.d/70-intel-drm.rules     стабильная ссылка /dev/dri/intel-card
 /etc/X11/xorg.conf.d/10-intel-only.conf  Xorg-греетер только на Intel
-~/.config/environment.d/kwin-gpu.conf    KWIN_DRM_DEVICES -> только Intel
+~/.config/environment.d/kwin-gpu.conf    KWIN_DRM_DEVICES + KWIN_RENDER_NODES -> Intel
 ~/.config/systemd/user/plasma-kwin_wayland.service.d/egl.conf
                                          KWin не грузит libEGL_nvidia
 ```
@@ -243,20 +244,22 @@ EOF
 
 ```bash
 sudo tee /etc/udev/rules.d/70-intel-drm.rules >/dev/null <<'EOF'
-SUBSYSTEM=="drm", KERNEL=="card*", KERNELS=="0000:00:02.0", SYMLINK+="dri/intel-card"
+SUBSYSTEM=="drm", KERNEL=="card*",    KERNELS=="0000:00:02.0", SYMLINK+="dri/intel-card"
+SUBSYSTEM=="drm", KERNEL=="renderD*", KERNELS=="0000:00:02.0", SYMLINK+="dri/intel-render"
 EOF
 sudo udevadm control --reload
 sudo udevadm trigger --subsystem-match=drm --action=add
 sudo udevadm settle
-ls -l /dev/dri/intel-card          # -> card1 (Intel)
+ls -l /dev/dri/intel-card /dev/dri/intel-render
 ```
 
-Ограничение KWin на Intel-карту:
+Ограничение KWin на Intel-карту и Intel render-узел:
 
 ```bash
 mkdir -p ~/.config/environment.d
 cat > ~/.config/environment.d/kwin-gpu.conf <<'EOF'
 KWIN_DRM_DEVICES=/dev/dri/intel-card
+KWIN_RENDER_NODES=/dev/dri/intel-render
 EOF
 ```
 
@@ -270,10 +273,14 @@ Environment=__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa
 EOF
 ```
 
-Зачем: `KWIN_DRM_DEVICES` ограничивает DRM-бэкенд, но само по себе не мешает
-KWin загрузить `libEGL_nvidia`, который открывает `/dev/nvidia*` и держит
-карту в D0. Именно EGL-drop-in решает эту проблему. Ограничение по DRM
-оставлено как дополнительная страховка.
+Зачем:
+- `KWIN_DRM_DEVICES` ограничивает DRM-бэкенд (какие `/dev/dri/card*` трогать);
+- `KWIN_RENDER_NODES` ограничивает `GpuManager`: в KWin 6.8.2 он сканирует
+  **все** render-узлы и иначе открывает `renderD129` NVIDIA, а вместе с ним
+  и `/dev/nvidia*`;
+- EGL-drop-in не даёт KWin загрузить `libEGL_nvidia`.
+
+Все три настройки дополняют друг друга.
 
 ### Шаг 11. Steam (опционально)
 
@@ -412,6 +419,7 @@ sudo reboot
 | `KWIN_DRM_DEVICES` (правильный путь) | Само по себе не помогло: KWin всё равно грузил `libEGL_nvidia`. Решил EGL-drop-in; ограничение по DRM оставлено как страховка |
 | `libva-nvidia-driver` | Бесполезен с nouveau (это драйвер для проприетарного NVIDIA) |
 | `nvidia_drm modeset=1` | Держит GPU через NVKMS (+1 MiB VRAM) — блокирует D3 |
+| Только EGL-drop-in (без `KWIN_RENDER_NODES`) | KWin 6.8.2 `GpuManager` всё равно открывает `renderD129` напрямую и держит `/dev/nvidia*` |
 | `NVreg_DynamicPowerManagement=0x02` | На Turing `Not supported`; рабочий вариант — `0x01` |
 
 Из этого в итоговый скрипт **не вошло** ничего, кроме проверенных шагов.
@@ -424,6 +432,7 @@ sudo reboot
 | `fix_rtd3.sh` | Промежуточный шаг: RTD3 + re-probe (вобрано в `setup-d3cold.sh`) |
 | `fix_d3_sleep.sh` | Промежуточный шаг: Xorg/KWin на Intel (вобрано) |
 | `enable_d3cold.sh` | Промежуточный шаг: `GpuInitOnProbe` + `modeset=0` (вобрано) |
+| `fix-kwin-render-nodes.sh` | Хотфикс KWin 6.8.2: `KWIN_RENDER_NODES` (после обновления KWin) |
 | `README.md` | Этот документ (русский) |
 | `README.en.md` | English version |
 | `LICENSE` | MIT License |
