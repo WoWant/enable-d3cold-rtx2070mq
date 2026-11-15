@@ -431,25 +431,7 @@ sudo reboot
    your pre-existing settings, unrelated to this task; the script does not
    touch them.
 
-## 11. Tried and rejected
-
-| Attempt | Result |
-|---------|--------|
-| `nouveau.config=NvGspRm=0` | Worse: without GSP, nouveau has no PMU firmware and hit `job timeout`s |
-| `nouveau.runpm=0` | No freezes, but the GPU stays in D0 (battery ~2 h) |
-| Blacklisting nouveau entirely | The GPU is not used at all (unacceptable) |
-| `d3cold_allowed=0` on nouveau | Removed only PCIe retraining; GSP re-init (~0.5 s) remained. On nvidia it **prevents** D3cold |
-| `POWERDEVIL_NO_DDCUTIL=1` | Does not affect the root cause |
-| `KWIN_DRM_DEVICES` with `by-path` | Broke the display: KWin splits the value on `:`, and `pci-0000:00:02.0-card` contains colons |
-| `KWIN_DRM_DEVICES` (correct path) | Alone it did not help: KWin still loaded `libEGL_nvidia`. The EGL drop-in solved it; the DRM restriction is kept as a safety net |
-| `libva-nvidia-driver` | Useless with nouveau (it is a driver for the proprietary NVIDIA stack) |
-| `nvidia_drm modeset=1` | Keeps the GPU open through NVKMS (+1 MiB VRAM) — blocks D3 |
-| EGL drop-in only (without `KWIN_RENDER_NODES`) | KWin 6.8.2 `GpuManager` still opens `renderD129` directly and holds `/dev/nvidia*` |
-| `NVreg_DynamicPowerManagement=0x02` | `Not supported` on Turing; the working value is `0x01` |
-
-Nothing but verified steps made it into the final script.
-
-## 12. Repository files
+## 11. Repository files
 
 | File | Purpose |
 |------|---------|
