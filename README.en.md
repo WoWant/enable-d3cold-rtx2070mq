@@ -371,6 +371,23 @@ prime-run %command%
   `active`. About 10–15 seconds after it exits, the GPU is back to
   `suspended` / `D3cold`.
 
+### Important limitation: native Wayland on NVIDIA
+
+With `nvidia_drm modeset=0` (required for D3cold), **native Wayland rendering
+on NVIDIA does not work**. Verified: `vkcube --wsi wayland` and `mpv
+--gpu-context=wayland` with the NVIDIA ICD crash (the NVIDIA driver needs KMS
+for Wayland dma-buf). KWin is not involved.
+
+What does work:
+- **Xwayland** (the default for Steam/Proton) — OpenGL and Vulkan;
+- `CUDA`/`OpenCL` and any compute;
+- `prime-run <app>` for X11/GLX apps;
+- Vulkan through Xwayland (`vkcube --wsi xcb` on NVIDIA — verified).
+
+If you specifically need a native-Wayland game on NVIDIA: either run it through
+Xwayland (do not enable `PROTON_ENABLE_WAYLAND`), or temporarily set
+`nvidia_drm modeset=1` (the GPU will not enter D3cold in that session).
+
 ## 9. Rollback
 
 Full rollback to nouveau (the freezes will return, but the system will work):

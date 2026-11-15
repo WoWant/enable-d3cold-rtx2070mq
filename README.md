@@ -365,6 +365,23 @@ prime-run %command%
 - Пока программа работает, светодиод оранжевый, `runtime_status` = `active`.
   Через ~10–15 секунд после выхода — снова `suspended` / `D3cold`.
 
+### Важное ограничение: native Wayland на NVIDIA
+
+При `nvidia_drm modeset=0` (нужно для D3cold) **native Wayland-рендеринг на
+NVIDIA не работает**. Проверено: `vkcube --wsi wayland` и `mpv
+--gpu-context=wayland` с NVIDIA ICD падают (NVIDIA-драйверу для Wayland
+dma-buf нужен KMS). KWin здесь ни при чём.
+
+Что работает:
+- **Xwayland** (по умолчанию для Steam/Proton) — OpenGL и Vulkan;
+- `CUDA`/`OpenCL` и любой compute;
+- `prime-run <app>` для X11/GLX-приложений;
+- Vulkan через Xwayland (`vkcube --wsi xcb` на NVIDIA — проверено).
+
+Если нужна именно native-Wayland игра на NVIDIA: либо запускайте её через
+Xwayland (не включайте `PROTON_ENABLE_WAYLAND`), либо временно поставьте
+`nvidia_drm modeset=1` (в этой сессии карта в D3cold уходить не будет).
+
 ## 9. Откат
 
 Полный откат на nouveau (вернутся зависания, но система будет рабочей):
