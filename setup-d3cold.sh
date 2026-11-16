@@ -164,21 +164,44 @@ cat > /etc/modprobe.d/nvidia.conf <<'EOF'
 #                                     (иначе висит ссылка + 1 MiB VRAM)
 options nvidia NVreg_DynamicPowerManagement=0x01 NVreg_GpuInitOnProbe=0
 options nvidia_drm modeset=0 fbdev=0
+
+# На MSI P65 порт Type-C к NVIDIA не разведён: 01:00.3 всегда падает по тайм-ауту I2C
+blacklist i2c_nvidia_gpu
+blacklist ucsi_ccg
 EOF
 ok "/etc/modprobe.d/nvidia.conf"
 
 # ---------------------------------------------------------------------------
-info "Шаг 7/11: обход бага ядра 7.3 (nullfs) — re-probe GPU в контексте процесса"
+info "Шаг 7/11: обход бага ядра 7.3 (nullfs) + защита от зависаний PGON"
 # ---------------------------------------------------------------------------
 cat > /usr/local/sbin/nvidia-rtd3-rebind <<'EOF'
 #!/bin/bash
-# На Linux 7.3 kthread при probe работает в пустой nullfs и не может прочитать
-# /sys/bus/pci/.../config. Драйвер молча выключает RTD3. Повторный probe
-# из контекста обычного процесса (unbind/bind) читает sysfs корректно.
+# 1) На Linux 7.3 kthread при probe работает в пустой nullfs и не может прочитать
+#    /sys/bus/pci/.../config. Драйвер молча выключает RTD3. Повторный probe
+#    из контекста обычного процесса (unbind/bind) читает sysfs корректно.
+# 2) Удаляет неразведённые на плате функции .1 (Audio), .2 (USB xHCI), .3 (UCSI),
+#    чтобы сканирование USB (adb, lsusb, fwupd) не будило карту из D3cold с
+#    0 мс задержкой и не вызывало клин BIOS \_SB.PCI0.PGON (AE_AML_LOOP_TIMEOUT).
+# 3) Ставит задержку автосна корневого порта PCIe 3000 мс (защита от дребезга PGOF->PGON).
 set -uo pipefail
 for bdf in /sys/bus/pci/drivers/nvidia/0000:*:*.*; do
     [ -e "$bdf" ] || continue
     dev=$(basename "$bdf")
+    slot="${dev%.*}"
+    bridge=$(basename "$(readlink -f "/sys/bus/pci/devices/$dev/..")" 2>/dev/null || true)
+
+    echo on > "/sys/bus/pci/devices/$dev/power/control" 2>/dev/null || true
+
+    if [ -n "$bridge" ] && [ -w "/sys/bus/pci/devices/$bridge/power/autosuspend_delay_ms" ]; then
+        echo 3000 > "/sys/bus/pci/devices/$bridge/power/autosuspend_delay_ms" 2>/dev/null || true
+    fi
+
+    for fn in 1 2 3; do
+        if [ -e "/sys/bus/pci/devices/${slot}.${fn}/remove" ]; then
+            echo 1 > "/sys/bus/pci/devices/${slot}.${fn}/remove" 2>/dev/null || true
+        fi
+    done
+
     echo "$dev" > /sys/bus/pci/drivers/nvidia/unbind 2>/dev/null || true
     echo "$dev" > /sys/bus/pci/drivers/nvidia/bind   2>/dev/null || true
     echo auto > "/sys/bus/pci/devices/$dev/power/control" 2>/dev/null || true
@@ -202,12 +225,64 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 systemctl enable nvidia-rtd3.service >/dev/null 2>&1 || true
-ok "helper + nvidia-rtd3.service"
+
+cat > /usr/lib/systemd/system-sleep/90-nvidia-d3cold-s3 <<'EOF'
+#!/bin/sh
+# Безопасный переход NVIDIA D3cold <-> S3 (deep):
+# будит GPU в D0 до заморозки сессий/консоли и возвращает в auto после пробуждения.
+case "${2:-}" in
+    suspend|hibernate|suspend-then-hibernate|hybrid-sleep) ;;
+    *) exit 0 ;;
+esac
+
+for bdf in /sys/bus/pci/drivers/nvidia/0000:*:*.*; do
+    [ -e "$bdf" ] || continue
+    dev=$(basename "$bdf")
+    slot="${dev%.*}"
+    bridge=$(basename "$(readlink -f "/sys/bus/pci/devices/$dev/..")" 2>/dev/null || true)
+
+    case "$1" in
+        pre)
+            if [ -w "/sys/bus/pci/devices/$dev/power/control" ]; then
+                echo on > "/sys/bus/pci/devices/$dev/power/control" 2>/dev/null || true
+                sleep 1
+            fi
+            ;;
+        post)
+            if [ -n "$bridge" ] && [ -w "/sys/bus/pci/devices/$bridge/power/autosuspend_delay_ms" ]; then
+                echo 3000 > "/sys/bus/pci/devices/$bridge/power/autosuspend_delay_ms" 2>/dev/null || true
+            fi
+            for fn in 1 2 3; do
+                if [ -e "/sys/bus/pci/devices/${slot}.${fn}/remove" ]; then
+                    echo 1 > "/sys/bus/pci/devices/${slot}.${fn}/remove" 2>/dev/null || true
+                fi
+            done
+            if [ -w "/sys/bus/pci/devices/$dev/power/control" ]; then
+                echo auto > "/sys/bus/pci/devices/$dev/power/control" 2>/dev/null || true
+            fi
+            ;;
+    esac
+done
+exit 0
+EOF
+chmod 755 /usr/lib/systemd/system-sleep/90-nvidia-d3cold-s3
+ok "helper + nvidia-rtd3.service + 90-nvidia-d3cold-s3"
 
 # ---------------------------------------------------------------------------
-info "Шаг 8/11: udev-правило NVIDIA (power/control=auto при bind)"
+info "Шаг 8/11: udev-правило NVIDIA (удаление .1/.2/.3 + power/control=auto)"
 # ---------------------------------------------------------------------------
 cat > /etc/udev/rules.d/80-nvidia-pm.rules <<'EOF'
+# Remove unused NVIDIA USB xHCI Host Controller (01:00.2) — prevents usb3/usb4
+# from waking the GPU out of D3cold on USB scans (adb, lsusb, fwupd) and
+# triggering \_SB.PCI0.PGON AE_AML_LOOP_TIMEOUT freezes.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c0330", ATTR{remove}="1"
+
+# Remove unused NVIDIA USB Type-C UCSI Controller (01:00.3)
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c8000", ATTR{remove}="1"
+
+# Remove unused NVIDIA Audio device (01:00.1, unusable with nvidia_drm modeset=0)
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x040300", ATTR{remove}="1"
+
 # Enable runtime PM for NVIDIA VGA/3D controller devices on driver bind
 ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", TEST=="power/control", ATTR{power/control}="auto"
 ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030200", TEST=="power/control", ATTR{power/control}="auto"

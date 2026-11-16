@@ -48,18 +48,21 @@ GSP ≈ 1.5 с (или ≈0.5 с из D3hot). Главный поток KWin в 
 | 4 | `nvidia_drm modeset=1` через NVKMS держит GPU открытым (+1 MiB VRAM) | `nvidia_drm modeset=0 fbdev=0` |
 | 5 | Держатели `/dev/nvidia*` (Xorg-греетер SDDM, KWin) не дают `usage_count` стать 0 | Xorg → только Intel; KWin → только Mesa/Intel |
 | 6 | KWin 6.8.2 `GpuManager` сканирует **все** render-узлы, включая `renderD129` (NVIDIA), и открывает `/dev/nvidia*` | `KWIN_RENDER_NODES=/dev/dri/intel-render` |
+| 7 | Неразведённые на плате функции Turing `01:00.2` (USB xHCI), `01:00.3` (UCSI) и `01:00.1` (Audio) будят GPU из `D3cold` при любом сканировании USB (`adb`, `lsusb`, `fwupd`) и при входе в S3 с задержкой 0 мс → дребезг питания `PGOF → PGON` и намертво зависающий BIOS `\_SB.PCI0.PGON` (`AE_AML_LOOP_TIMEOUT`, жёлтый LED, вентиляторы 100%) | Удаление `.1/.2/.3` через udev (`ATTR{remove}="1"` по NVIDIA README §21H), `autosuspend_delay_ms=3000` на мосту `00:01.0`, sleep-хук `90-nvidia-d3cold-s3` |
 
-Любая одна из причин 1–6 блокирует D3cold. Нужны все сразу.
+Любая одна из причин 1–6 блокирует D3cold, а причина 7 приводит к жёстким зависаниям при пробуждении из D3cold.
 
 ## 3. Итоговая рабочая конфигурация
 
 ```
 /etc/modprobe.d/blacklist-nouveau.conf   blacklist nouveau
-/etc/modprobe.d/nvidia.conf              RTD3 + GpuInitOnProbe + modeset=0 fbdev=0
-/usr/local/sbin/nvidia-rtd3-rebind       re-probe GPU (обход nullfs)
+/etc/modprobe.d/nvidia.conf              RTD3 + GpuInitOnProbe + modeset=0 + blacklist i2c/ucsi
+/usr/local/sbin/nvidia-rtd3-rebind       re-probe GPU + удаление .1/.2/.3 + задержка моста 3000 мс
 /etc/systemd/system/nvidia-rtd3.service  запуск re-probe до display-manager
-/etc/udev/rules.d/80-nvidia-pm.rules     power/control=auto при bind
-/etc/udev/rules.d/70-intel-drm.rules     стабильная ссылка /dev/dri/intel-card
+/usr/lib/systemd/system-sleep/90-nvidia-d3cold-s3
+                                         безопасный переход D3cold <-> S3 (deep)
+/etc/udev/rules.d/80-nvidia-pm.rules     удаление .1/.2/.3 + power/control=auto при bind
+/etc/udev/rules.d/70-intel-drm.rules     стабильные ссылки /dev/dri/intel-card и intel-render
 /etc/X11/xorg.conf.d/10-intel-only.conf  Xorg-греетер только на Intel
 ~/.config/environment.d/kwin-gpu.conf    KWIN_DRM_DEVICES + KWIN_RENDER_NODES -> Intel
 ~/.config/systemd/user/plasma-kwin_wayland.service.d/egl.conf
@@ -154,6 +157,8 @@ sudo sed -i '/^POWERDEVIL_NO_DDCUTIL=/d' /etc/environment
 sudo tee /etc/modprobe.d/nvidia.conf >/dev/null <<'EOF'
 options nvidia NVreg_DynamicPowerManagement=0x01 NVreg_GpuInitOnProbe=0
 options nvidia_drm modeset=0 fbdev=0
+blacklist i2c_nvidia_gpu
+blacklist ucsi_ccg
 EOF
 ```
 
@@ -161,8 +166,10 @@ EOF
 - `NVreg_GpuInitOnProbe=0` — драйвер не инициализирует GPU на probe и не
   держит ссылку питания.
 - `modeset=0 fbdev=0` — `nvidia_drm` не открывает GPU через NVKMS.
+- `blacklist i2c_nvidia_gpu` / `ucsi_ccg` — на MSI P65 порт Type-C к NVIDIA
+  не разведён (`01:00.3` иначе висит по таймауту I2C при загрузке).
 
-### Шаг 7. Обход бага ядра 7.3 (re-probe)
+### Шаг 7. Обход бага ядра 7.3 (re-probe) + защита от клина `PGON` при S3/USB
 
 ```bash
 sudo tee /usr/local/sbin/nvidia-rtd3-rebind >/dev/null <<'EOF'
@@ -171,6 +178,21 @@ set -uo pipefail
 for bdf in /sys/bus/pci/drivers/nvidia/0000:*:*.*; do
     [ -e "$bdf" ] || continue
     dev=$(basename "$bdf")
+    slot="${dev%.*}"
+    bridge=$(basename "$(readlink -f "/sys/bus/pci/devices/$dev/..")" 2>/dev/null || true)
+
+    echo on > "/sys/bus/pci/devices/$dev/power/control" 2>/dev/null || true
+
+    if [ -n "$bridge" ] && [ -w "/sys/bus/pci/devices/$bridge/power/autosuspend_delay_ms" ]; then
+        echo 3000 > "/sys/bus/pci/devices/$bridge/power/autosuspend_delay_ms" 2>/dev/null || true
+    fi
+
+    for fn in 1 2 3; do
+        if [ -e "/sys/bus/pci/devices/${slot}.${fn}/remove" ]; then
+            echo 1 > "/sys/bus/pci/devices/${slot}.${fn}/remove" 2>/dev/null || true
+        fi
+    done
+
     echo "$dev" > /sys/bus/pci/drivers/nvidia/unbind 2>/dev/null || true
     echo "$dev" > /sys/bus/pci/drivers/nvidia/bind   2>/dev/null || true
     echo auto > "/sys/bus/pci/devices/$dev/power/control" 2>/dev/null || true
@@ -196,19 +218,32 @@ EOF
 sudo systemctl enable nvidia-rtd3.service
 ```
 
-Зачем: на ядре 7.3 модуль загружается из kthread, который не видит sysfs.
-Повторный probe из обычного процесса читает sysfs корректно и включает RTD3.
+Дополнительно создаётся хук `/usr/lib/systemd/system-sleep/90-nvidia-d3cold-s3`,
+который перед уходом в S3 (`deep`) будит GPU в `D0` заранее в обычном контексте
+процесса (до заморозки сессий и остановки консоли/EC), а после пробуждения
+возвращает `power/control=auto`.
 
-### Шаг 8. Разрешить runtime PM в udev
+### Шаг 8. Удалить неразведённые функции `.1/.2/.3` и разрешить runtime PM в udev
 
 ```bash
 sudo tee /etc/udev/rules.d/80-nvidia-pm.rules >/dev/null <<'EOF'
+ACTION=="add",    SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c0330", ATTR{remove}="1"
+ACTION=="add",    SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x0c8000", ATTR{remove}="1"
+ACTION=="add",    SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x040300", ATTR{remove}="1"
 ACTION=="bind",   SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", TEST=="power/control", ATTR{power/control}="auto"
 ACTION=="bind",   SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030200", TEST=="power/control", ATTR{power/control}="auto"
 ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", TEST=="power/control", ATTR{power/control}="on"
 ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030200", TEST=="power/control", ATTR{power/control}="on"
 EOF
 ```
+
+Зачем удалять `0x0c0330` (`01:00.2` USB xHCI), `0x0c8000` (`01:00.3` UCSI) и
+`0x040300` (`01:00.1` Audio) — см. официальную документацию NVIDIA (`README`
+§21H): на MSI P65 физический порт Type-C к NVIDIA не разведён, но оставленный
+на шине `01:00.2` создаёт пустые шины `usb3`/`usb4` с `autosuspend_delay_ms=0`.
+Любое сканирование USB (`adb`, `lsusb`, `fwupd`) будит через них видеокарту в
+обход `/dev/nvidia*` и вызывает дребезг питания `PGOF → PGON`, от которого метод
+BIOS `\_SB.PCI0.PGON` виснет по 30-секундному `AE_AML_LOOP_TIMEOUT`.
 
 ### Шаг 9. Xorg-греетер SDDM — только Intel
 
@@ -391,6 +426,7 @@ sudo rm -f /etc/modprobe.d/nvidia.conf /etc/modprobe.d/blacklist-nouveau.conf
 sudo rm -f /etc/udev/rules.d/80-nvidia-pm.rules
 sudo rm -f /etc/systemd/system/nvidia-rtd3.service
 sudo rm -f /usr/local/sbin/nvidia-rtd3-rebind
+sudo rm -f /usr/lib/systemd/system-sleep/90-nvidia-d3cold-s3
 sudo rm -f /etc/X11/xorg.conf.d/10-intel-only.conf
 rm -f ~/.config/systemd/user/plasma-kwin_wayland.service.d/egl.conf
 sudo pacman -S --needed vulkan-nouveau lib32-vulkan-nouveau
@@ -432,6 +468,7 @@ sudo reboot
 | `fix_d3_sleep.sh` | Промежуточный шаг: Xorg/KWin на Intel (вобрано) |
 | `enable_d3cold.sh` | Промежуточный шаг: `GpuInitOnProbe` + `modeset=0` (вобрано) |
 | `fix-kwin-render-nodes.sh` | Хотфикс KWin 6.8.2: `KWIN_RENDER_NODES` (после обновления KWin) |
+| `fix-d3cold-freeze.sh` | Хотфикс жёстких зависаний `PGON AE_AML_LOOP_TIMEOUT` при сканировании USB (`adb`) и S3 (`deep`) |
 | `README.md` | Этот документ (русский) |
 | `README.en.md` | English version |
 | `LICENSE` | MIT License |
